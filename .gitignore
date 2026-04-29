@@ -1,0 +1,14 @@
+# Carpetas de compilación y librerías (basura de sistema)
+.pio/
+.vscode/
+bin/
+objs/
+
+# Archivos binarios (evita que se suban ejecutables)
+*.elf
+*.bin
+*.exe
+
+# Archivos temporales del sistema
+.DS_Store
+Thumbs.db
