@@ -1,10 +1,13 @@
-from machine import Pin
-from time import sleep
+#include <Arduino.h>
 
-led = Pin(22, Pin.OUT)
+void setup() {
+  pinMode(22, OUTPUT);
+  Serial.begin(115200);
+}
 
-while True:
-    led.value(1)
-    sleep(1)
-    led.value(0)
-    sleep(1)
+void loop() {
+  digitalWrite(22, HIGH);
+  delay(1000);
+  digitalWrite(22, LOW);
+  delay(1000);
+}
