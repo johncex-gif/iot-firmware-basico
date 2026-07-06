@@ -1,7 +1,7 @@
 {
   "functions": [
     {
-      "source": "functions",
+      "source": "Semana9/functions",
       "codebase": "default",
       "disallowLegacyRuntimeConfig": true,
       "ignore": [
@@ -14,7 +14,7 @@
     }
   ],
   "hosting": {
-    "public": "public",
+    "public": "Semana9/public",
     "ignore": [
       "firebase.json",
       "**/.*",
