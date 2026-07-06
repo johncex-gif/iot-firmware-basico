@@ -1,0 +1,52 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Verifica que la petición viene de un usuario autenticado con Firebase Auth
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Verifica que el usuario autenticado es el dueño del recurso
+    function isOwner(ownerUid) {
+      return isAuthenticated() && request.auth.uid == ownerUid;
+    }
+
+    // -------------------------------------------------------------------------
+    // Colección: /users/{userId}
+    // Cada usuario solo puede leer y escribir su propio documento de perfil.
+    // -------------------------------------------------------------------------
+    match /users/{userId} {
+      allow read, write: if isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // -------------------------------------------------------------------------
+    // Colección: /devices/{deviceId}
+    // Registra los dispositivos IoT (ESP32) asociados a cada usuario.
+    // - Lectura: solo el dueño del dispositivo puede leer su ficha.
+    // - Escritura: solo el dueño puede crear/modificar su dispositivo.
+    //   La Cloud Function actualiza `lastSeen` usando el Admin SDK (no aplica reglas).
+    // -------------------------------------------------------------------------
+    match /devices/{deviceId} {
+      allow read: if isAuthenticated() &&
+        (resource == null || isOwner(resource.data.ownerUid));
+      allow write: if isAuthenticated() &&
+        request.resource.data.ownerUid == request.auth.uid;
+    }
+
+    // -------------------------------------------------------------------------
+    // Colección: /telemetry/{telemetryId}
+    // Almacena las lecturas enviadas por el ESP32.
+    // - Lectura: solo el usuario dueño del dato (campo ownerUid guardado por la Function).
+    // - Escritura directa desde cliente: PROHIBIDA.
+    //   Todo dato entra únicamente a través de la Cloud Function (Admin SDK),
+    //   que omite estas reglas por diseño.
+    // -------------------------------------------------------------------------
+    match /telemetry/{telemetryId} {
+      allow read: if isAuthenticated() &&
+        isOwner(resource.data.ownerUid);
+      allow write: if false;
+    }
+  }
+}
