@@ -789,8 +789,11 @@ const MAX_CHART_POINTS = 30;
 // ══════════════════════════════════════════════════════
 //  Inicialización Firebase
 // ══════════════════════════════════════════════════════
+// Inicializa la aplicación de Firebase con la clave de API y los identificadores de proyecto
 firebase.initializeApp(FIREBASE_CONFIG);
+// Obtiene el servicio de autenticación para controlar el inicio de sesión y cierre de sesión de usuarios
 const auth = firebase.auth();
+// Obtiene el servicio de base de datos Firestore para leer datos y configurar listeners en tiempo real
 const db   = firebase.firestore();
 
 // ══════════════════════════════════════════════════════
@@ -865,23 +868,28 @@ function traducirError(code) {
 // ══════════════════════════════════════════════════════
 //  Firestore — listener en tiempo real
 // ══════════════════════════════════════════════════════
+// Construye la consulta de Firestore basada en los filtros activos de la interfaz de usuario.
 function buildQuery(uid) {
   const limit = parseInt(document.getElementById('filter-limit').value) || 50;
   const device = document.getElementById('filter-device').value;
 
+  // Consulta base: Filtra por el propietario de los datos para cumplir con las reglas de seguridad
   let q = db.collection('telemetry')
     .where('ownerUid', '==', uid)
-    .orderBy('timestamp', 'desc')
+    .orderBy('timestamp', 'desc') // Orden descendente para obtener siempre los registros más recientes
     .limit(limit);
 
+  // Si se seleccionó un dispositivo específico, agrega el filtro de igualdad
   if (device) q = q.where('deviceId', '==', device);
   return q;
 }
 
+// Inicia la escucha en tiempo real de Firestore para recibir datos a medida que los ESP32 los envían.
 function startListening(uid) {
   showToast('Conectando a Firestore…');
-  stopListening();
+  stopListening(); // Evita fugas de memoria y múltiples conexiones desvinculando la consulta anterior
 
+  // onSnapshot establece un túnel de comunicación síncrona en tiempo real con Firestore
   unsubscribe = buildQuery(uid).onSnapshot(
     snapshot => {
       hideToast();
@@ -890,10 +898,11 @@ function startListening(uid) {
       const rows = [];
       snapshot.forEach(doc => {
         const d = doc.data();
+        // Almacenar los datos mapeados incluyendo el identificador único del documento
         rows.push({ id: doc.id, ...d });
       });
 
-      // Actualizar dispositivos conocidos en el select
+      // Registrar dinámicamente dispositivos desconocidos en la lista desplegable de la interfaz
       rows.forEach(r => {
         if (r.deviceId && !knownDevices.has(r.deviceId)) {
           knownDevices.add(r.deviceId);
@@ -905,6 +914,7 @@ function startListening(uid) {
       });
 
       allRows = rows;
+      // Llama a la lógica de renderizado pasándole los datos y la lista de cambios del snapshot (útil para detectar nuevos documentos)
       render(rows, snapshot.docChanges());
     },
     err => {
@@ -968,29 +978,43 @@ function setKPI(id, value, unit, sub) {
 let chartTemp = null;
 let chartHum  = null;
 
+// Inicializa las gráficas utilizando la librería Chart.js
 function initCharts() {
+  // Configuración base reutilizable para ambos gráficos (Temperatura y Humedad)
   const baseOpts = (color, label, unit) => ({
-    type: 'line',
-    data: { datasets: [{ label, data: [], borderColor: color, backgroundColor: color + '18',
-      borderWidth: 2, pointRadius: 3, pointHoverRadius: 6, tension: 0.4, fill: true }] },
+    type: 'line', // Tipo de gráfico: línea continua
+    data: { 
+      datasets: [{ 
+        label, 
+        data: [], // Se poblará dinámicamente con los datos de Firestore
+        borderColor: color, 
+        backgroundColor: color + '18', // Fondo con transparencia (formato hex + opacidad)
+        borderWidth: 2, 
+        pointRadius: 3, 
+        pointHoverRadius: 6, 
+        tension: 0.4, // Curvatura suave de la línea (Bezier)
+        fill: true 
+      }] 
+    },
     options: {
-      responsive: true, maintainAspectRatio: false,
-      animation: { duration: 400 },
+      responsive: true, 
+      maintainAspectRatio: false,
+      animation: { duration: 400 }, // Duración de las transiciones al actualizar datos
       interaction: { intersect: false, mode: 'index' },
       plugins: {
-        legend: { display: false },
+        legend: { display: false }, // Ocultar leyenda global ya que el badge del header indica qué es cada cosa
         tooltip: {
           backgroundColor: '#151e2e',
           borderColor: 'rgba(99,179,237,0.2)',
           borderWidth: 1,
           titleColor: '#94a3b8',
           bodyColor: '#e2e8f0',
-          callbacks: { label: ctx => ` ${ctx.parsed.y.toFixed(1)} ${unit}` }
+          callbacks: { label: ctx => ` ${ctx.parsed.y.toFixed(1)} ${unit}` } // Formateo personalizado de tooltip
         }
       },
       scales: {
         x: {
-          type: 'time',
+          type: 'time', // Escala temporal. Requiere el adaptador de fecha cargado mediante CDN
           time: { tooltipFormat: 'HH:mm:ss', displayFormats: { second: 'HH:mm:ss', minute: 'HH:mm' } },
           grid: { color: 'rgba(99,179,237,0.06)' },
           ticks: { color: '#64748b', maxTicksLimit: 6, font: { family: 'JetBrains Mono', size: 11 } }
@@ -1004,22 +1028,26 @@ function initCharts() {
     }
   });
 
+  // Obtener contextos canvas 2D
   const ctxT = document.getElementById('chart-temp').getContext('2d');
   const ctxH = document.getElementById('chart-hum').getContext('2d');
 
+  // Crear instancias globales de las gráficas
   chartTemp = new Chart(ctxT, baseOpts('#fb923c', 'Temperatura', '°C'));
   chartHum  = new Chart(ctxH, baseOpts('#2dd4bf', 'Humedad',     '%'));
 }
 
+// Actualiza las series de datos de las gráficas con la nueva información recibida de Firestore
 function updateCharts(ascRows) {
   if (!chartTemp) initCharts();
 
-  // Tomar los últimos MAX_CHART_POINTS puntos
+  // Limitar los puntos a mostrar en el eje X para evitar saturar el gráfico
   const slice = ascRows.slice(-MAX_CHART_POINTS);
 
+  // Mapear los datos de Firestore al formato {x, y} de puntos de Chart.js
   const tempData = slice.map(r => ({
-    x: toMs(r.timestamp),
-    y: getField(r, ['temperature','temperatura','temp'])
+    x: toMs(r.timestamp), // Eje X: timestamp en milisegundos
+    y: getField(r, ['temperature','temperatura','temp']) // Eje Y: valor de la variable
   })).filter(p => p.y !== null);
 
   const humData = slice.map(r => ({
@@ -1027,12 +1055,15 @@ function updateCharts(ascRows) {
     y: getField(r, ['humidity','humedad','hum'])
   })).filter(p => p.y !== null);
 
+  // Asignar los nuevos conjuntos de datos mapeados a las instancias correspondientes
   chartTemp.data.datasets[0].data = tempData;
   chartHum.data.datasets[0].data  = humData;
+
+  // Actualizar los gráficos. 'none' indica actualización inmediata sin animaciones de transición
   chartTemp.update('none');
   chartHum.update('none');
 
-  // Mostrar device en badge
+  // Actualizar el indicador (badge) del dispositivo origen
   const lastDevice = ascRows[ascRows.length - 1]?.deviceId || '—';
   document.getElementById('temp-device-badge').textContent = lastDevice;
   document.getElementById('hum-device-badge').textContent  = lastDevice;

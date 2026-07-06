@@ -79,36 +79,52 @@ export default function DashboardPage() {
     setMounted(true);
   }, []);
 
-  // 1. Escuchar los dispositivos del usuario en tiempo real
+  // =============================================================================
+  // 1. ESCUCHA ACTIVA DE DISPOSITIVOS EN FIRESTORE (TIEMPO REAL)
+  // =============================================================================
+  // Suscribe un listener en tiempo real a la colección 'devices' filtrando por
+  // el usuario autenticado (ownerUid). Permite actualizar la UI si se añade/edita un dispositivo.
   useEffect(() => {
     if (!user) return;
 
+    // Consulta: Busca dispositivos en la colección 'devices' donde el propietario coincide con el UID de Firebase Auth
     const q = query(
       collection(db, 'devices'),
       where('ownerUid', '==', user.uid)
     );
 
+    // onSnapshot establece una conexión persistente (WebSockets) con Firestore.
+    // Se ejecuta inmediatamente con el estado actual de la base de datos y luego en cada actualización.
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const devList: Device[] = [];
       snapshot.forEach((docSnap) => {
+        // Combinamos el ID del documento de Firestore con los campos de datos
         devList.push({ id: docSnap.id, ...docSnap.data() } as Device);
       });
       setDevices(devList);
+      // Seleccionar automáticamente el primer dispositivo de la lista si no hay ninguno seleccionado previamente
       if (devList.length > 0 && !selectedDeviceId) {
         setSelectedDeviceId(devList[0].id);
       }
     });
 
+    // Función de limpieza: desvincula el listener en tiempo real cuando el componente se desmonta o cambia el usuario
     return () => unsubscribe();
   }, [user, selectedDeviceId]);
 
-  // 2. Escuchar la telemetría en tiempo real del dispositivo seleccionado
+  // =============================================================================
+  // 2. ESCUCHA ACTIVA DE TELEMETRÍA EN FIRESTORE (TIEMPO REAL)
+  // =============================================================================
+  // Suscribe un listener en tiempo real para obtener las últimas 20 lecturas de telemetría
+  // asociadas al dispositivo seleccionado actualmente.
   useEffect(() => {
     if (!selectedDeviceId) {
       setTelemetry([]);
       return;
     }
 
+    // Consulta: Colección 'telemetry', filtrando por ID de dispositivo, ordenando por timestamp descendente
+    // y limitando los resultados a los últimos 20 registros.
     const q = query(
       collection(db, 'telemetry'),
       where('deviceId', '==', selectedDeviceId),
@@ -123,28 +139,33 @@ export default function DashboardPage() {
         readings.push({
           id: docSnap.id,
           deviceId: raw.deviceId,
+          // Convertir el tipo Timestamp de Firestore a un objeto Date de JS
           timestamp: raw.timestamp?.toDate() || new Date(),
           data: raw.data
         });
       });
-      // Invertir lecturas para mostrar cronológicamente de izquierda a derecha
+      // Invertir el arreglo para que el gráfico muestre la línea temporal correctamente de izquierda a derecha (más antiguo a más nuevo)
       setTelemetry(readings.reverse());
     });
 
+    // Desconectar el listener cuando el dispositivo seleccionado cambie o el componente se desmonte
     return () => unsubscribe();
   }, [selectedDeviceId]);
 
-  // Crear un nuevo dispositivo
+  // Registrar un nuevo dispositivo físico en la base de datos Firestore.
   const handleCreateDevice = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!user || !newDeviceId || !newDeviceName) return;
 
     setIsCreating(true);
     try {
-      // Generar una clave de API aleatoria simple
+      // Generar una clave de API aleatoria simple para autenticar las peticiones POST del ESP32
       const generatedApiKey = 'key_' + Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
       
+      // Crear una referencia al documento en la colección 'devices' usando el ID ingresado como ID del documento (en minúsculas)
       const newDevRef = doc(db, 'devices', newDeviceId.trim().toLowerCase());
+      
+      // Escribir el nuevo documento en Firestore. Si ya existe, se sobrescribirá.
       await setDoc(newDevRef, {
         apiKey: generatedApiKey,
         name: newDeviceName,
@@ -184,13 +205,19 @@ export default function DashboardPage() {
     ? (new Date().getTime() - latestReading.timestamp.getTime()) < 3 * 60 * 1000
     : false;
 
-  // Formatear datos para el gráfico de Recharts
+  // =============================================================================
+  // FORMATEAR DATOS PARA EL GRÁFICO (RECHARTS)
+  // =============================================================================
+  // Transforma el arreglo de lecturas de telemetría en el formato plano que
+  // espera Recharts. Cada objeto tiene un campo para el eje X (tiempo formateado)
+  // y campos para las variables que se representarán en el eje Y (temperatura y humedad).
   const chartData = telemetry.map(t => {
+    // Formatear el timestamp a formato de hora legible local 'HH:MM:SS' para el eje X
     const timeStr = t.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     return {
-      name: timeStr,
-      Temperatura: t.data.temperature || 0,
-      Humedad: t.data.humidity || 0,
+      name: timeStr,                           // Etiqueta del eje X
+      Temperatura: t.data.temperature || 0,     // Primer valor del eje Y
+      Humedad: t.data.humidity || 0,           // Segundo valor del eje Y
     };
   });
 
@@ -384,6 +411,16 @@ export default function DashboardPage() {
             
             <div style={{ flex: 1, width: '100%', height: '100%', minHeight: '300px' }}>
               {telemetry.length > 0 ? (
+                {/* 
+                  ResponsiveContainer: Hace que el gráfico se adapte dinámicamente al tamaño del contenedor padre.
+                  LineChart: Componente raíz del gráfico que recibe el arreglo `chartData` formateado.
+                  CartesianGrid: Cuadrícula de fondo del gráfico.
+                  XAxis: Eje horizontal vinculado a la propiedad 'name' (marca de tiempo formateada).
+                  YAxis: Eje vertical que escala los valores de las variables.
+                  Tooltip: Cuadro emergente que se muestra al pasar el mouse por encima del gráfico.
+                  Legend: Leyenda que identifica las series (Líneas) del gráfico.
+                  Line: Cada una de las series graficadas (Temperatura en cian, Humedad en púrpura).
+                */}
                 <ResponsiveContainer width="100%" height={300}>
                   <LineChart data={chartData} margin={{ top: 5, right: 20, left: -10, bottom: 5 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
