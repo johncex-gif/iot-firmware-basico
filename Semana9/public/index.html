@@ -789,8 +789,11 @@ const MAX_CHART_POINTS = 30;
 // ══════════════════════════════════════════════════════
 //  Inicialización Firebase
 // ══════════════════════════════════════════════════════
+// Inicializa la aplicación de Firebase con la clave de API y los identificadores de proyecto
 firebase.initializeApp(FIREBASE_CONFIG);
+// Obtiene el servicio de autenticación para controlar el inicio de sesión y cierre de sesión de usuarios
 const auth = firebase.auth();
+// Obtiene el servicio de base de datos Firestore para leer datos y configurar listeners en tiempo real
 const db   = firebase.firestore();
 
 // ══════════════════════════════════════════════════════
@@ -865,23 +868,28 @@ function traducirError(code) {
 // ══════════════════════════════════════════════════════
 //  Firestore — listener en tiempo real
 // ══════════════════════════════════════════════════════
+// Construye la consulta de Firestore basada en los filtros activos de la interfaz de usuario.
 function buildQuery(uid) {
   const limit = parseInt(document.getElementById('filter-limit').value) || 50;
   const device = document.getElementById('filter-device').value;
 
+  // Consulta base: Filtra por el propietario de los datos para cumplir con las reglas de seguridad
   let q = db.collection('telemetry')
     .where('ownerUid', '==', uid)
-    .orderBy('timestamp', 'desc')
+    .orderBy('timestamp', 'desc') // Orden descendente para obtener siempre los registros más recientes
     .limit(limit);
 
+  // Si se seleccionó un dispositivo específico, agrega el filtro de igualdad
   if (device) q = q.where('deviceId', '==', device);
   return q;
 }
 
+// Inicia la escucha en tiempo real de Firestore para recibir datos a medida que los ESP32 los envían.
 function startListening(uid) {
   showToast('Conectando a Firestore…');
-  stopListening();
+  stopListening(); // Evita fugas de memoria y múltiples conexiones desvinculando la consulta anterior
 
+  // onSnapshot establece un túnel de comunicación síncrona en tiempo real con Firestore
   unsubscribe = buildQuery(uid).onSnapshot(
     snapshot => {
       hideToast();
@@ -890,10 +898,11 @@ function startListening(uid) {
       const rows = [];
       snapshot.forEach(doc => {
         const d = doc.data();
+        // Almacenar los datos mapeados incluyendo el identificador único del documento
         rows.push({ id: doc.id, ...d });
       });
 
-      // Actualizar dispositivos conocidos en el select
+      // Registrar dinámicamente dispositivos desconocidos en la lista desplegable de la interfaz
       rows.forEach(r => {
         if (r.deviceId && !knownDevices.has(r.deviceId)) {
           knownDevices.add(r.deviceId);
@@ -905,6 +914,7 @@ function startListening(uid) {
       });
 
       allRows = rows;
+      // Llama a la lógica de renderizado pasándole los datos y la lista de cambios del snapshot (útil para detectar nuevos documentos)
       render(rows, snapshot.docChanges());
     },
     err => {
@@ -931,9 +941,42 @@ function render(rows, changes) {
   // Ordenar ascendente para las gráficas
   const asc = [...rows].sort((a, b) => toMs(a.timestamp) - toMs(b.timestamp));
 
+  verificarUltimaLectura(rows);
   updateKPIs(rows);
   updateCharts(asc);
   updateTable(rows, changes);
+}
+
+
+// ── Telegram Alerts ───────────────────────────────────
+let alertaEnviada = false; 
+let alertaDesconexionEnviada = false;
+let deviceWasConnected = false;
+
+function verificarAlertaTelegram(temperatura) {
+  const UMBRAL_CRITICO = 30.0; 
+  const TELEGRAM_BOT_TOKEN = "8027154150:AAEJVMBKEhpKWtsHXs0tR_FC7h8lux65TvI";
+  const TELEGRAM_CHAT_ID = "8187283958";
+
+  if (temperatura > UMBRAL_CRITICO && !alertaEnviada) {
+    const mensaje = encodeURIComponent(`🚨 ¡ALERTA CRÍTICA IOT! 🚨\nLa temperatura actual es de ${temperatura.toFixed(1)}°C, superando el límite seguro.`);
+    const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage?chat_id=${TELEGRAM_CHAT_ID}&text=${mensaje}`;
+
+    fetch(url)
+      .then(response => {
+        if (response.ok) {
+          console.log("Alerta enviada correctamente a Telegram.");
+          alertaEnviada = true; 
+        } else {
+          console.error("Fallo al enviar la alerta por Telegram.");
+        }
+      })
+      .catch(err => console.error("Error de red en Telegram:", err));
+  } 
+
+  if (temperatura <= UMBRAL_CRITICO) {
+    alertaEnviada = false;
+  }
 }
 
 // ── KPIs ──────────────────────────────────────────────
@@ -944,6 +987,10 @@ function updateKPIs(rows) {
   const temp = getField(latest, ['temperature','temperatura','temp']);
   const hum  = getField(latest, ['humidity','humedad','hum']);
 
+  if (temp !== null) {
+    verificarAlertaTelegram(temp);
+  }
+
   const allTemps = rows.map(r => getField(r, ['temperature','temperatura','temp'])).filter(v => v !== null);
   const maxTemp  = allTemps.length ? Math.max(...allTemps) : null;
 
@@ -953,6 +1000,7 @@ function updateKPIs(rows) {
   document.getElementById('kpi-count').innerHTML = rows.length + '';
   document.getElementById('kpi-count-sub').textContent = `Última: ${fmtTime(latest.timestamp)}`;
 }
+
 
 function setKPI(id, value, unit, sub) {
   const el = document.getElementById(id);
@@ -968,29 +1016,43 @@ function setKPI(id, value, unit, sub) {
 let chartTemp = null;
 let chartHum  = null;
 
+// Inicializa las gráficas utilizando la librería Chart.js
 function initCharts() {
+  // Configuración base reutilizable para ambos gráficos (Temperatura y Humedad)
   const baseOpts = (color, label, unit) => ({
-    type: 'line',
-    data: { datasets: [{ label, data: [], borderColor: color, backgroundColor: color + '18',
-      borderWidth: 2, pointRadius: 3, pointHoverRadius: 6, tension: 0.4, fill: true }] },
+    type: 'line', // Tipo de gráfico: línea continua
+    data: { 
+      datasets: [{ 
+        label, 
+        data: [], // Se poblará dinámicamente con los datos de Firestore
+        borderColor: color, 
+        backgroundColor: color + '18', // Fondo con transparencia (formato hex + opacidad)
+        borderWidth: 2, 
+        pointRadius: 3, 
+        pointHoverRadius: 6, 
+        tension: 0.4, // Curvatura suave de la línea (Bezier)
+        fill: true 
+      }] 
+    },
     options: {
-      responsive: true, maintainAspectRatio: false,
-      animation: { duration: 400 },
+      responsive: true, 
+      maintainAspectRatio: false,
+      animation: { duration: 400 }, // Duración de las transiciones al actualizar datos
       interaction: { intersect: false, mode: 'index' },
       plugins: {
-        legend: { display: false },
+        legend: { display: false }, // Ocultar leyenda global ya que el badge del header indica qué es cada cosa
         tooltip: {
           backgroundColor: '#151e2e',
           borderColor: 'rgba(99,179,237,0.2)',
           borderWidth: 1,
           titleColor: '#94a3b8',
           bodyColor: '#e2e8f0',
-          callbacks: { label: ctx => ` ${ctx.parsed.y.toFixed(1)} ${unit}` }
+          callbacks: { label: ctx => ` ${ctx.parsed.y.toFixed(1)} ${unit}` } // Formateo personalizado de tooltip
         }
       },
       scales: {
         x: {
-          type: 'time',
+          type: 'time', // Escala temporal. Requiere el adaptador de fecha cargado mediante CDN
           time: { tooltipFormat: 'HH:mm:ss', displayFormats: { second: 'HH:mm:ss', minute: 'HH:mm' } },
           grid: { color: 'rgba(99,179,237,0.06)' },
           ticks: { color: '#64748b', maxTicksLimit: 6, font: { family: 'JetBrains Mono', size: 11 } }
@@ -1004,22 +1066,26 @@ function initCharts() {
     }
   });
 
+  // Obtener contextos canvas 2D
   const ctxT = document.getElementById('chart-temp').getContext('2d');
   const ctxH = document.getElementById('chart-hum').getContext('2d');
 
+  // Crear instancias globales de las gráficas
   chartTemp = new Chart(ctxT, baseOpts('#fb923c', 'Temperatura', '°C'));
   chartHum  = new Chart(ctxH, baseOpts('#2dd4bf', 'Humedad',     '%'));
 }
 
+// Actualiza las series de datos de las gráficas con la nueva información recibida de Firestore
 function updateCharts(ascRows) {
   if (!chartTemp) initCharts();
 
-  // Tomar los últimos MAX_CHART_POINTS puntos
+  // Limitar los puntos a mostrar en el eje X para evitar saturar el gráfico
   const slice = ascRows.slice(-MAX_CHART_POINTS);
 
+  // Mapear los datos de Firestore al formato {x, y} de puntos de Chart.js
   const tempData = slice.map(r => ({
-    x: toMs(r.timestamp),
-    y: getField(r, ['temperature','temperatura','temp'])
+    x: toMs(r.timestamp), // Eje X: timestamp en milisegundos
+    y: getField(r, ['temperature','temperatura','temp']) // Eje Y: valor de la variable
   })).filter(p => p.y !== null);
 
   const humData = slice.map(r => ({
@@ -1027,12 +1093,15 @@ function updateCharts(ascRows) {
     y: getField(r, ['humidity','humedad','hum'])
   })).filter(p => p.y !== null);
 
+  // Asignar los nuevos conjuntos de datos mapeados a las instancias correspondientes
   chartTemp.data.datasets[0].data = tempData;
   chartHum.data.datasets[0].data  = humData;
+
+  // Actualizar los gráficos. 'none' indica actualización inmediata sin animaciones de transición
   chartTemp.update('none');
   chartHum.update('none');
 
-  // Mostrar device en badge
+  // Actualizar el indicador (badge) del dispositivo origen
   const lastDevice = ascRows[ascRows.length - 1]?.deviceId || '—';
   document.getElementById('temp-device-badge').textContent = lastDevice;
   document.getElementById('hum-device-badge').textContent  = lastDevice;
@@ -1119,10 +1188,87 @@ function hideToast() {
 }
 
 // ── Connection status ─────────────────────────────────
+let watchdogTimer = null;
+
 function setConnected(ok) {
-  document.getElementById('status-dot').style.background  = ok ? 'var(--accent-green)' : 'var(--accent-red)';
-  document.getElementById('status-dot').style.boxShadow   = ok ? '0 0 8px var(--accent-green)' : '0 0 8px var(--accent-red)';
-  document.getElementById('status-text').textContent = ok ? 'En línea' : 'Sin conexión';
+  const statusDot = document.getElementById('status-dot');
+  const statusText = document.getElementById('status-text');
+  
+  if (statusDot) {
+    statusDot.style.background  = ok ? 'var(--accent-green)' : 'var(--accent-red)';
+    statusDot.style.boxShadow   = ok ? '0 0 8px var(--accent-green)' : '0 0 8px var(--accent-red)';
+  }
+  if (statusText) {
+    statusText.textContent = ok ? 'Dispositivo en línea' : 'Dispositivo desconectado';
+  }
+
+  // Telegram watchdog alert (disconnection / reconnection)
+  const TELEGRAM_BOT_TOKEN = "8027154150:AAEJVMBKEhpKWtsHXs0tR_FC7h8lux65TvI";
+  const TELEGRAM_CHAT_ID = "8187283958";
+
+  // Send offline alert ONLY if the device was previously seen connected in this session
+  if (!ok && deviceWasConnected && !alertaDesconexionEnviada) {
+    const mensaje = encodeURIComponent(`🚨 ¡ALERTA DE DESCONEXIÓN! 🚨\nEl dispositivo IoT se encuentra fuera de línea. No se han recibido lecturas en los últimos 40 segundos.`);
+    const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage?chat_id=${TELEGRAM_CHAT_ID}&text=${mensaje}`;
+
+    fetch(url)
+      .then(response => {
+        if (response.ok) {
+          console.log("Alerta de desconexión enviada correctamente a Telegram.");
+          alertaDesconexionEnviada = true;
+        } else {
+          console.error("Fallo al enviar la alerta de desconexión por Telegram.");
+        }
+      })
+      .catch(err => console.error("Error de red en Telegram (desconexión):", err));
+  }
+
+  // Send online recovery alert if it was previously reported as disconnected
+  if (ok && alertaDesconexionEnviada) {
+    const mensaje = encodeURIComponent(`✅ ¡DISPOSITIVO EN LÍNEA! 📶\nEl dispositivo IoT ha restablecido la conexión y está transmitiendo datos nuevamente.`);
+    const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage?chat_id=${TELEGRAM_CHAT_ID}&text=${mensaje}`;
+
+    fetch(url)
+      .then(response => {
+        if (response.ok) {
+          console.log("Notificación de reconexión enviada correctamente a Telegram.");
+          alertaDesconexionEnviada = false;
+        } else {
+          console.error("Fallo al enviar la notificación de reconexión por Telegram.");
+        }
+      })
+      .catch(err => console.error("Error de red en Telegram (reconexión):", err));
+  }
+
+  if (ok) {
+    deviceWasConnected = true;
+  }
+}
+
+function verificarUltimaLectura(rows) {
+  if (!rows.length) return;
+  
+  const ultimaLecturaMs = toMs(rows[0].timestamp);
+  const ahoraMs = Date.now();
+  const diferenciaSegundos = (ahoraMs - ultimaLecturaMs) / 1000;
+
+  // Si pasan más de 40 segundos sin recibir datos nuevos, se marca como desconectado
+  if (diferenciaSegundos > 40) {
+    setConnected(false);
+  } else {
+    setConnected(true);
+  }
+
+  // Monitorear constantemente cada 5 segundos
+  if (!watchdogTimer) {
+    watchdogTimer = setInterval(() => {
+      if (allRows.length) {
+        const ultimaMs = toMs(allRows[0].timestamp);
+        const diff = (Date.now() - ultimaMs) / 1000;
+        setConnected(diff <= 40);
+      }
+    }, 5000);
+  }
 }
 </script>
 </body>

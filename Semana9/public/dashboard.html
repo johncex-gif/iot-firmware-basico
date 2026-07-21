@@ -941,9 +941,42 @@ function render(rows, changes) {
   // Ordenar ascendente para las gráficas
   const asc = [...rows].sort((a, b) => toMs(a.timestamp) - toMs(b.timestamp));
 
+  verificarUltimaLectura(rows);
   updateKPIs(rows);
   updateCharts(asc);
   updateTable(rows, changes);
+}
+
+
+// ── Telegram Alerts ───────────────────────────────────
+let alertaEnviada = false; 
+let alertaDesconexionEnviada = false;
+let deviceWasConnected = false;
+
+function verificarAlertaTelegram(temperatura) {
+  const UMBRAL_CRITICO = 30.0; 
+  const TELEGRAM_BOT_TOKEN = "8027154150:AAEJVMBKEhpKWtsHXs0tR_FC7h8lux65TvI";
+  const TELEGRAM_CHAT_ID = "8187283958";
+
+  if (temperatura > UMBRAL_CRITICO && !alertaEnviada) {
+    const mensaje = encodeURIComponent(`🚨 ¡ALERTA CRÍTICA IOT! 🚨\nLa temperatura actual es de ${temperatura.toFixed(1)}°C, superando el límite seguro.`);
+    const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage?chat_id=${TELEGRAM_CHAT_ID}&text=${mensaje}`;
+
+    fetch(url)
+      .then(response => {
+        if (response.ok) {
+          console.log("Alerta enviada correctamente a Telegram.");
+          alertaEnviada = true; 
+        } else {
+          console.error("Fallo al enviar la alerta por Telegram.");
+        }
+      })
+      .catch(err => console.error("Error de red en Telegram:", err));
+  } 
+
+  if (temperatura <= UMBRAL_CRITICO) {
+    alertaEnviada = false;
+  }
 }
 
 // ── KPIs ──────────────────────────────────────────────
@@ -954,6 +987,10 @@ function updateKPIs(rows) {
   const temp = getField(latest, ['temperature','temperatura','temp']);
   const hum  = getField(latest, ['humidity','humedad','hum']);
 
+  if (temp !== null) {
+    verificarAlertaTelegram(temp);
+  }
+
   const allTemps = rows.map(r => getField(r, ['temperature','temperatura','temp'])).filter(v => v !== null);
   const maxTemp  = allTemps.length ? Math.max(...allTemps) : null;
 
@@ -963,6 +1000,7 @@ function updateKPIs(rows) {
   document.getElementById('kpi-count').innerHTML = rows.length + '';
   document.getElementById('kpi-count-sub').textContent = `Última: ${fmtTime(latest.timestamp)}`;
 }
+
 
 function setKPI(id, value, unit, sub) {
   const el = document.getElementById(id);
@@ -1150,10 +1188,87 @@ function hideToast() {
 }
 
 // ── Connection status ─────────────────────────────────
+let watchdogTimer = null;
+
 function setConnected(ok) {
-  document.getElementById('status-dot').style.background  = ok ? 'var(--accent-green)' : 'var(--accent-red)';
-  document.getElementById('status-dot').style.boxShadow   = ok ? '0 0 8px var(--accent-green)' : '0 0 8px var(--accent-red)';
-  document.getElementById('status-text').textContent = ok ? 'En línea' : 'Sin conexión';
+  const statusDot = document.getElementById('status-dot');
+  const statusText = document.getElementById('status-text');
+  
+  if (statusDot) {
+    statusDot.style.background  = ok ? 'var(--accent-green)' : 'var(--accent-red)';
+    statusDot.style.boxShadow   = ok ? '0 0 8px var(--accent-green)' : '0 0 8px var(--accent-red)';
+  }
+  if (statusText) {
+    statusText.textContent = ok ? 'Dispositivo en línea' : 'Dispositivo desconectado';
+  }
+
+  // Telegram watchdog alert (disconnection / reconnection)
+  const TELEGRAM_BOT_TOKEN = "8027154150:AAEJVMBKEhpKWtsHXs0tR_FC7h8lux65TvI";
+  const TELEGRAM_CHAT_ID = "8187283958";
+
+  // Send offline alert ONLY if the device was previously seen connected in this session
+  if (!ok && deviceWasConnected && !alertaDesconexionEnviada) {
+    const mensaje = encodeURIComponent(`🚨 ¡ALERTA DE DESCONEXIÓN! 🚨\nEl dispositivo IoT se encuentra fuera de línea. No se han recibido lecturas en los últimos 40 segundos.`);
+    const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage?chat_id=${TELEGRAM_CHAT_ID}&text=${mensaje}`;
+
+    fetch(url)
+      .then(response => {
+        if (response.ok) {
+          console.log("Alerta de desconexión enviada correctamente a Telegram.");
+          alertaDesconexionEnviada = true;
+        } else {
+          console.error("Fallo al enviar la alerta de desconexión por Telegram.");
+        }
+      })
+      .catch(err => console.error("Error de red en Telegram (desconexión):", err));
+  }
+
+  // Send online recovery alert if it was previously reported as disconnected
+  if (ok && alertaDesconexionEnviada) {
+    const mensaje = encodeURIComponent(`✅ ¡DISPOSITIVO EN LÍNEA! 📶\nEl dispositivo IoT ha restablecido la conexión y está transmitiendo datos nuevamente.`);
+    const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage?chat_id=${TELEGRAM_CHAT_ID}&text=${mensaje}`;
+
+    fetch(url)
+      .then(response => {
+        if (response.ok) {
+          console.log("Notificación de reconexión enviada correctamente a Telegram.");
+          alertaDesconexionEnviada = false;
+        } else {
+          console.error("Fallo al enviar la notificación de reconexión por Telegram.");
+        }
+      })
+      .catch(err => console.error("Error de red en Telegram (reconexión):", err));
+  }
+
+  if (ok) {
+    deviceWasConnected = true;
+  }
+}
+
+function verificarUltimaLectura(rows) {
+  if (!rows.length) return;
+  
+  const ultimaLecturaMs = toMs(rows[0].timestamp);
+  const ahoraMs = Date.now();
+  const diferenciaSegundos = (ahoraMs - ultimaLecturaMs) / 1000;
+
+  // Si pasan más de 40 segundos sin recibir datos nuevos, se marca como desconectado
+  if (diferenciaSegundos > 40) {
+    setConnected(false);
+  } else {
+    setConnected(true);
+  }
+
+  // Monitorear constantemente cada 5 segundos
+  if (!watchdogTimer) {
+    watchdogTimer = setInterval(() => {
+      if (allRows.length) {
+        const ultimaMs = toMs(allRows[0].timestamp);
+        const diff = (Date.now() - ultimaMs) / 1000;
+        setConnected(diff <= 40);
+      }
+    }, 5000);
+  }
 }
 </script>
 </body>
